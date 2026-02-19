@@ -248,3 +248,6 @@ data/
 
 # Credentials
 credentials.json
+
+experiments/outputs/
+
