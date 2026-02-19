@@ -201,3 +201,4 @@ if __name__ == "__main__":
     print("\nEmpty text_final:", (df2["text_final"].str.len() == 0).sum())
     print("Avg tokens_after_spacy:", df2["tokens_after_spacy"].apply(len).mean())
     print("Avg tokens_final:", df2["tokens_final"].apply(len).mean())
+
