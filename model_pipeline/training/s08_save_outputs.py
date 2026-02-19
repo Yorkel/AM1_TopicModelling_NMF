@@ -3,18 +3,21 @@ s08_save_outputs.py
 
 Step 08: Save outputs (versioned artifacts for reproducibility)
 
-Saves into a versioned run folder:
+Saves into:
+experiments/outputs/runs/<run_id>/
+
+Artifacts:
 - fitted TF-IDF vectorizer (joblib)
 - trained NMF model (joblib)
-- topic name mapping (json)
-- run metadata (json)  <-- now includes TF-IDF params too
-- copies optional evaluation outputs from s07 (if they exist)
-
-Also runs S06 in main() so the analysis-ready CSV is produced.
+- topic mapping (json)
+- run metadata (json)
+- optional evaluation CSVs (from S07) saved into run folder + data/Interrim/
 
 Run:
 python -m model_pipeline.training.s08_save_outputs
 """
+
+from __future__ import annotations
 
 import json
 import logging
@@ -25,25 +28,18 @@ from typing import Any, Optional
 
 import joblib
 import numpy as np
+import pandas as pd
 
-from model_pipeline.training.s06_topic_allocation import (
-    TOPIC_NAMES,
-    export_analysis_ready_csv,
-    run_topic_allocation,
-)
+from model_pipeline.training.s06_topic_allocation import TOPIC_NAMES
 
 logger = logging.getLogger(__name__)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Project root (robust paths no matter where command is run from)
-# ─────────────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+# ✅ THIS is the missing constant your S09/S10 expect
+RUNS_DIR = PROJECT_ROOT / "experiments" / "outputs" / "runs"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Run metadata container
-# ─────────────────────────────────────────────────────────────────────────────
+
 @dataclass
 class RunMetadata:
     run_id: str
@@ -53,9 +49,9 @@ class RunMetadata:
     tfidf_shape: tuple[int, int]
 
     # TF-IDF params (audit trail)
-    tfidf_min_df: Any
-    tfidf_max_df: Any
-    tfidf_max_features: Any
+    tfidf_min_df: Optional[float]
+    tfidf_max_df: Optional[float]
+    tfidf_max_features: Optional[int]
     tfidf_ngram_range: list[int]
     tfidf_vocab_size: Optional[int]
 
@@ -65,15 +61,14 @@ class RunMetadata:
     nmf_random_state: int
     nmf_max_iter: int
 
-    # Metrics
     reconstruction_error: float
+
     dominant_topic_weight_min: float
     dominant_topic_weight_mean: float
     dominant_topic_weight_max: float
 
 
-def _make_run_id() -> str:
-    # readable + sortable
+def make_run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
 
 
@@ -97,29 +92,37 @@ def _copy_if_exists(src: Path, dst: Path) -> None:
         dst.write_bytes(src.read_bytes())
         logger.info("Copied: %s -> %s", src, dst)
     else:
-        logger.info("Optional file not found (skipped): %s", src)
+        logger.info("Optional file missing (skipped): %s", src)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Save function
-# ─────────────────────────────────────────────────────────────────────────────
+def _write_df_csv(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+    logger.info("Wrote CSV: %s", path)
+
+
 def save_run_outputs(
+    *,
     run_dir: Path,
     vectorizer,
     nmf_model,
     X,
-    topic_names: dict[int, str] = TOPIC_NAMES,
     dataset_name: str = "full_retro",
     reconstruction_error: Optional[float] = None,
     W: Optional[np.ndarray] = None,
+    coherence_df: Optional[pd.DataFrame] = None,
+    stability_df: Optional[pd.DataFrame] = None,
 ) -> Path:
     """
-    Persists artifacts + metadata into a versioned run directory.
+    Persist artifacts + metadata into run_dir.
+    Optionally save S07 evaluation outputs into:
+      - run_dir/evaluation/
+      - data/Interrim/ (so the rest of your project still finds them)
     """
     run_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Saving run artifacts to: %s", run_dir)
 
-    # 1) Save fitted artifacts
+    # 1) Artifacts
     vec_path = run_dir / "vectorizer.joblib"
     nmf_path = run_dir / "nmf_model.joblib"
     joblib.dump(vectorizer, vec_path)
@@ -127,11 +130,11 @@ def save_run_outputs(
     logger.info("Saved: %s", vec_path)
     logger.info("Saved: %s", nmf_path)
 
-    # 2) Save topic mapping
+    # 2) Topic mapping
     topic_map_path = run_dir / "topic_names.json"
-    _write_json({str(k): v for k, v in topic_names.items()}, topic_map_path)
+    _write_json({str(k): v for k, v in TOPIC_NAMES.items()}, topic_map_path)
 
-    # 3) Compute W for dominant stats if not provided
+    # 3) Compute W if missing
     if W is None:
         try:
             W = nmf_model.transform(X)
@@ -141,6 +144,13 @@ def save_run_outputs(
     if reconstruction_error is None:
         reconstruction_error = getattr(nmf_model, "reconstruction_err_", None)
 
+    # 4) TF-IDF params
+    ngram = getattr(vectorizer, "ngram_range", (1, 1))
+    vocab_size = None
+    if hasattr(vectorizer, "vocabulary_") and vectorizer.vocabulary_ is not None:
+        vocab_size = len(vectorizer.vocabulary_)
+
+    # 5) Dominant stats
     if W is not None:
         dom = W.max(axis=1)
         dom_min, dom_mean, dom_max = dom.min(), dom.mean(), dom.max()
@@ -149,15 +159,7 @@ def save_run_outputs(
     else:
         dom_min = dom_mean = dom_max = float("nan")
         n_docs = int(X.shape[0])
-        n_topics = int(getattr(nmf_model, "n_components", len(topic_names)))
-
-    # 4) TF-IDF params for audit trail (read off fitted vectorizer)
-    tfidf_min_df = getattr(vectorizer, "min_df", None)
-    tfidf_max_df = getattr(vectorizer, "max_df", None)
-    tfidf_max_features = getattr(vectorizer, "max_features", None)
-    ngram = getattr(vectorizer, "ngram_range", (1, 1))
-    tfidf_ngram_range = [int(ngram[0]), int(ngram[1])]
-    tfidf_vocab_size = len(vectorizer.vocabulary_) if hasattr(vectorizer, "vocabulary_") else None
+        n_topics = int(getattr(nmf_model, "n_components", len(TOPIC_NAMES)))
 
     meta = RunMetadata(
         run_id=run_dir.name,
@@ -165,11 +167,11 @@ def save_run_outputs(
         dataset_name=dataset_name,
         n_docs=n_docs,
         tfidf_shape=(int(X.shape[0]), int(X.shape[1])),
-        tfidf_min_df=tfidf_min_df,
-        tfidf_max_df=tfidf_max_df,
-        tfidf_max_features=tfidf_max_features,
-        tfidf_ngram_range=tfidf_ngram_range,
-        tfidf_vocab_size=tfidf_vocab_size,
+        tfidf_min_df=getattr(vectorizer, "min_df", None),
+        tfidf_max_df=getattr(vectorizer, "max_df", None),
+        tfidf_max_features=getattr(vectorizer, "max_features", None),
+        tfidf_ngram_range=[int(ngram[0]), int(ngram[1])],
+        tfidf_vocab_size=vocab_size,
         nmf_n_topics=n_topics,
         nmf_init=str(getattr(nmf_model, "init", "")),
         nmf_random_state=int(getattr(nmf_model, "random_state", -1) or -1),
@@ -181,7 +183,16 @@ def save_run_outputs(
     )
     _write_json(asdict(meta), run_dir / "run_metadata.json")
 
-    # 5) Copy optional s07 outputs into this run folder (if present)
+    # 6) Save evaluation outputs if provided
+    if coherence_df is not None:
+        _write_df_csv(coherence_df, run_dir / "evaluation" / "coherence_sweep.csv")
+        _write_df_csv(coherence_df, PROJECT_ROOT / "data" / "Interrim" / "coherence_sweep.csv")
+
+    if stability_df is not None:
+        _write_df_csv(stability_df, run_dir / "evaluation" / "stability_seeds.csv")
+        _write_df_csv(stability_df, PROJECT_ROOT / "data" / "Interrim" / "stability_seeds.csv")
+
+    # 7) Backward-compatible: if someone already wrote them elsewhere, copy into run
     _copy_if_exists(
         PROJECT_ROOT / "data" / "Interrim" / "coherence_sweep.csv",
         run_dir / "evaluation" / "coherence_sweep.csv",
@@ -194,61 +205,63 @@ def save_run_outputs(
     return run_dir
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main: run full training + topic allocation + save artifacts
-# ─────────────────────────────────────────────────────────────────────────────
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    import logging
 
     from model_pipeline.training.s01_data_loader import load_articles
     from model_pipeline.training.s02_cleaning import run_cleaning
     from model_pipeline.training.s03_spacy_processing import run_spacy_processing
     from model_pipeline.training.s04_vectorisation import run_vectorisation
     from model_pipeline.training.s05_nmf_training import train_nmf
+    from model_pipeline.training.s06_topic_allocation import run_topic_allocation, export_analysis_ready_csv
+    from model_pipeline.training.s07_evaluation import (
+        evaluate_coherence_over_topic_range,
+        evaluate_topic_stability,
+    )
 
-    run_id = _make_run_id()
-    run_dir = PROJECT_ROOT / "experiments" / "outputs" / "runs" / run_id
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger("gensim").setLevel(logging.WARNING)
 
-    # 1) Load + preprocess
-    df = load_articles("full_retro")
+    dataset_name = "full_retro"
+    run_id = make_run_id()
+    run_dir = RUNS_DIR / run_id
+
+    df = load_articles(dataset_name)
     df = run_cleaning(df)
     df = run_spacy_processing(df)
 
-    # 2) Vectorise (fit vectorizer)
     vec_out = run_vectorisation(df)
-
-    # 3) Train final NMF (30 topics)
     nmf_out = train_nmf(vec_out.X)
 
-    # 4) Topic allocation + analysis-ready export (S06)
-    df_alloc = run_topic_allocation(
-        df=df,
-        nmf_model=nmf_out.nmf_model,
-        vectorizer=vec_out.vectorizer,
+    # S06 export
+    df_alloc = run_topic_allocation(df, nmf_model=nmf_out.nmf_model, vectorizer=vec_out.vectorizer)
+    analysis_csv = PROJECT_ROOT / "data" / dataset_name / "retro_topics_analysis_ready.csv"
+    export_analysis_ready_csv(df_alloc, analysis_csv)
+
+    # S07 evaluation
+    coh_df = evaluate_coherence_over_topic_range(
+        X=vec_out.X,
+        feature_names=vec_out.feature_names,
+        texts_tokens=df["tokens_final"].tolist(),
+        topic_range=range(5, 80, 5),
+        n_top_words=10,
     )
+    stab_df = evaluate_topic_stability(X=vec_out.X)
 
-    out_csv = PROJECT_ROOT / "data" / "full_retro" / "retro_topics_analysis_ready.csv"
-    export_analysis_ready_csv(df_alloc, out_csv)
-    logger.info("Analysis-ready CSV written: %s", out_csv)
-
-    # 5) Save run artifacts
     save_run_outputs(
         run_dir=run_dir,
         vectorizer=vec_out.vectorizer,
         nmf_model=nmf_out.nmf_model,
         X=vec_out.X,
-        topic_names=TOPIC_NAMES,
-        dataset_name="full_retro",
+        dataset_name=dataset_name,
         reconstruction_error=nmf_out.reconstruction_error,
         W=nmf_out.W,
+        coherence_df=coh_df,
+        stability_df=stab_df,
     )
 
     print("\n✅ Saved run artifacts to:")
     print(run_dir)
-    print("\nContents:")
-    for p in sorted(run_dir.rglob("*")):
-        if p.is_file():
-            print(" -", p.relative_to(PROJECT_ROOT).as_posix())
 
 
 if __name__ == "__main__":
