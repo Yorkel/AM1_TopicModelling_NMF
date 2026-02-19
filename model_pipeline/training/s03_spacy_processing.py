@@ -1,7 +1,7 @@
 """
 s03_spacy_processing.py
 
-Step 03: spaCy processing + post-spaCy junk filtering (matches notebook workflow)
+Step 03: spaCy processing + post-spaCy junk filtering (matches FINAL notebook workflow)
 
 Input:
 - df with column: 'text_clean' (from s02_cleaning)
@@ -11,10 +11,16 @@ Output:
     - tokens_after_spacy  (list[str])
     - tokens_final        (list[str])
     - text_final          (str)  joined tokens for vectorisation
+
+NOTE (important):
+- This version matches your notebook EXACTLY in stopword logic:
+  it removes STOP_WORDS (spaCy default stopword set) inside spacy_clean().
+- Your earlier pipeline version used CUSTOM_STOPWORDS (expanded list).
+  That would shift vocabulary and topics. This version does NOT do that.
 """
 
 import logging
-from typing import List, Any, Set
+from typing import Any, List, Set
 
 import pandas as pd
 import spacy
@@ -25,9 +31,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # Domain-specific stopwords (from your notebook)
 # ─────────────────────────────────────────────────────────────────────────────
-MEDIA: Set[str] = {
-    "schoolsweek",
-}
+MEDIA: Set[str] = {"schoolsweek"}
 
 TIME_STOPWORDS: Set[str] = {
     "day", "days", "week", "weeks", "month", "months", "year", "years",
@@ -37,29 +41,6 @@ TIME_STOPWORDS: Set[str] = {
     "january", "february", "march", "april", "may", "june", "july", "august",
     "september", "october", "november", "december",
 }
-
-CUSTOM_STOPWORDS: Set[str] = set(STOP_WORDS).union({
-    # Web/social junk
-    "share", "print", "visit", "site", "experience", "cookie",
-
-    # Publication metadata
-    "summary", "publication", "topic", "news", "blog", "thank",
-    "article", "report", "statistic", "research", "consultation",
-    "datum", "info", "contact", "event", "commission", "foundation",
-
-    # Generic/overused terms
-    "use", "work", "information", "time", "job", "thing", "way",
-    "government", "policy", "service", "people", "need", "make",
-    "number", "cent", "high", "new", "different", "large", "place",
-    "individual", "human", "view", "analysis", "change", "support",
-
-    # Lemmatization artefacts
-    "cooky", "prev", "fed", "tv", "size", "join",
-
-    # Org types (keep specific orgs, remove generic labels)
-    "organisation", "org", "institute", "committee", "department",
-})
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Post-spaCy junk terms (from your notebook)
@@ -104,16 +85,13 @@ JUNK_TERMS: Set[str] = {
     "introduce", "implement", "launch", "rollout",
 }
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # spaCy model loader (lazy singleton)
 # ─────────────────────────────────────────────────────────────────────────────
 _NLP = None
 
 def get_nlp(model_name: str = "en_core_web_sm"):
-    """
-    Load spaCy model once per process.
-    """
+    """Load spaCy model once per process."""
     global _NLP
     if _NLP is None:
         logger.info("Loading spaCy model: %s", model_name)
@@ -122,16 +100,17 @@ def get_nlp(model_name: str = "en_core_web_sm"):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core tokenisation/cleaning (mirrors notebook logic)
+# Core tokenisation/cleaning (matches notebook logic)
 # ─────────────────────────────────────────────────────────────────────────────
 def spacy_clean(doc: Any, nlp) -> List[str]:
     """
+    Notebook-equivalent:
     - Create spaCy Doc
     - Remove PERSON entities
     - Remove MEDIA + TIME_STOPWORDS
     - Keep only POS in {NOUN, PROPN, ADJ}
     - Lemmatise
-    - Remove stopwords (uses CUSTOM_STOPWORDS)
+    - Remove STOP_WORDS (spaCy default stopword list)
     """
     if not isinstance(doc, str):
         return []
@@ -151,16 +130,14 @@ def spacy_clean(doc: Any, nlp) -> List[str]:
         # Keep only informative POS
         if token.pos_ in {"NOUN", "PROPN", "ADJ"}:
             lemma = token.lemma_.lower()
-            if lemma and lemma not in CUSTOM_STOPWORDS:
+            if lemma and lemma not in STOP_WORDS:
                 tokens.append(lemma)
 
     return tokens
 
 
 def remove_junk(tokens: List[str]) -> List[str]:
-    """
-    Remove post-spaCy junk terms (list filter).
-    """
+    """Remove post-spaCy junk terms (list filter)."""
     return [t for t in tokens if t not in JUNK_TERMS]
 
 
@@ -197,24 +174,16 @@ def run_spacy_processing(df: pd.DataFrame, text_col: str = "text_clean") -> pd.D
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Smoke test (standalone run) — robust to both run styles
+# Smoke test (package mode ONLY)
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import logging
 
+    from model_pipeline.training.s01_data_loader import load_articles
+    from model_pipeline.training.s02_cleaning import run_cleaning
+
     logging.basicConfig(level=logging.INFO)
 
-    # Try package-style imports first (works with: python -m model_pipeline.training.s03_spacy_processing)
-    try:
-        from model_pipeline.training.s01_data_loader import load_articles
-        from model_pipeline.training.s02_cleaning import run_cleaning
-    except ModuleNotFoundError:
-        # Fallback for direct-path execution:
-        # python model_pipeline/training/s03_spacy_processing.py
-        from s01_data_loader import load_articles
-        from s02_cleaning import run_cleaning
-
-    # Small sample for speed
     df = load_articles("full_retro").head(200)
     df = run_cleaning(df)
     df2 = run_spacy_processing(df)
@@ -223,14 +192,12 @@ if __name__ == "__main__":
     print("Columns added:",
           [c for c in ["tokens_after_spacy", "tokens_final", "text_final"] if c in df2.columns])
 
-    # Show a quick before/after
     i = df2.index[0]
     print("\n--- text_clean (first 300 chars) ---")
     print(df2.loc[i, "text_clean"][:300])
     print("\n--- text_final (first 300 chars) ---")
     print(df2.loc[i, "text_final"][:300])
 
-    # Basic sanity checks
     print("\nEmpty text_final:", (df2["text_final"].str.len() == 0).sum())
     print("Avg tokens_after_spacy:", df2["tokens_after_spacy"].apply(len).mean())
     print("Avg tokens_final:", df2["tokens_final"].apply(len).mean())
