@@ -229,3 +229,22 @@ outputs/
 
 # .ipynb_checkpoints/
 **/.ipynb_checkpoints/
+
+
+# -----------------------------
+# AM1 Project Specific
+# -----------------------------
+
+# Model artifacts
+*.pkl
+*.joblib
+model_pipeline/models/
+
+# MLflow
+mlruns/
+
+# Raw data
+data/
+
+# Credentials
+credentials.json
