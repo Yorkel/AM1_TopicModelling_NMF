@@ -251,3 +251,5 @@ credentials.json
 
 experiments/outputs/
 
+# MLflow local tracking (file-based)
+experiments/mlruns/
