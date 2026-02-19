@@ -1,0 +1,218 @@
+"""
+s06_topic_allocation.py
+
+Step 06: Topic allocation + export (matches notebook "analysis-ready dataset")
+
+Input:
+- df with:
+    - 'text_clean' (for export readability; from s02)
+    - 'text_final' (for vectorisation; from s03)
+    - metadata: url, date, source, type (as available)
+- fitted vectorizer (from s04)
+- trained NMF model (from s05)
+
+Output:
+- df with:
+    - topic_num
+    - topic_name
+    - dominant_topic_weight
+    - 30 continuous topic weight columns (named exactly like notebook)
+    - year, month
+- writes CSV: data/full_retro/retro_topics_analysis_ready.csv
+"""
+
+import logging
+from pathlib import Path
+from typing import Dict
+
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+TOPIC_NAMES: Dict[int, str] = {
+    0: "child_and_family_support",
+    1: "academy_finance_and_oversight",
+    2: "mat_governance",
+    3: "teacher_pay",
+    4: "ofsted_inspections",
+    5: "academic_attainment",
+    6: "pupil_absence",
+    7: "dfe_intervention",
+    8: "send_provision",
+    9: "teacher_strikes",
+    10: "apprenticeships",
+    11: "exam_regulation",
+    12: "raac_crisis",
+    13: "examinations_and_assessment",
+    14: "school_funding",
+    15: "education_politics",
+    16: "education_research",
+    17: "leadership_appointments",
+    18: "ai_and_edtech",
+    19: "post_16_education",
+    20: "mental_health",
+    21: "safeguarding",
+    22: "teacher_recruitment",
+    23: "accountability_reform",
+    24: "curriculum_policy",
+    25: "attendance_hubs",
+    26: "disadvantage_and_attainment_gaps",
+    27: "free_school_meals",
+    28: "school_places",
+    29: "exclusions",
+}
+
+
+def run_topic_allocation(
+    df: pd.DataFrame,
+    nmf_model,
+    vectorizer,
+    text_final_col: str = "text_final",
+    text_clean_col: str = "text_clean",
+    date_col: str = "date",
+    topic_names: Dict[int, str] = TOPIC_NAMES,
+) -> pd.DataFrame:
+    """
+    Compute topic weights:
+      X = vectorizer.transform(text_final)
+      W = nmf_model.transform(X)
+
+    Then:
+      - topic_num = argmax(W)
+      - dominant_topic_weight = max(W)
+      - add 30 topic weight columns named via topic_names
+      - add year/month from date (if date present)
+    """
+    if text_final_col not in df.columns:
+        raise KeyError(f"Expected '{text_final_col}' not found. Available: {list(df.columns)}")
+
+    if text_clean_col not in df.columns:
+        logger.warning(
+            "Column '%s' not found (export will miss readable cleaned text).",
+            text_clean_col,
+        )
+
+    logger.info("Step 06 (topic allocation): starting. Input shape=%s", df.shape)
+
+    out = df.copy()
+
+    # Year / month (matches notebook)
+    if date_col in out.columns:
+        out[date_col] = pd.to_datetime(out[date_col], errors="coerce")
+        out["year"] = out[date_col].dt.year
+        out["month"] = out[date_col].dt.month
+    else:
+        logger.warning("No '%s' column found; skipping year/month creation.", date_col)
+
+    texts = out[text_final_col].fillna("").astype(str)
+    X = vectorizer.transform(texts)     # transform (NOT fit_transform)
+    W = nmf_model.transform(X)          # transform (NOT fit_transform)
+
+    # Dominant topic assignment (matches notebook export)
+    out["topic_num"] = W.argmax(axis=1)
+    out["topic_name"] = out["topic_num"].map(topic_names)
+    out["dominant_topic_weight"] = W.max(axis=1)
+
+    # Continuous topic weights columns
+    n_topics = W.shape[1]
+    missing = set(range(n_topics)) - set(topic_names.keys())
+    if missing:
+        raise ValueError(f"topic_names is missing keys for topic ids: {sorted(missing)}")
+
+    for i in range(n_topics):
+        col = topic_names[i]
+        out[col] = W[:, i]  # numpy 1D already; pandas handles it fine
+
+    # Notebook safety-style warning
+    if out["topic_num"].nunique() != n_topics:
+        logger.warning(
+            "Not all topics appear as dominant topics. unique=%d expected=%d",
+            out["topic_num"].nunique(),
+            n_topics,
+        )
+
+    logger.info("Step 06 (topic allocation): complete. Output shape=%s", out.shape)
+    return out
+
+
+def export_analysis_ready_csv(
+    df: pd.DataFrame,
+    out_path: Path,
+    topic_names: Dict[int, str] = TOPIC_NAMES,
+) -> Path:
+    """
+    Export in notebook-style column order.
+    Only exports columns that exist in df.
+    """
+    topic_cols = [topic_names[i] for i in range(len(topic_names))]
+
+    export_cols = [
+        "url",
+        "date",
+        "year",
+        "month",
+        "source",
+        "type",
+        "text_clean",
+        "topic_num",
+        "topic_name",
+        "dominant_topic_weight",
+        *topic_cols,
+    ]
+
+    existing = [c for c in export_cols if c in df.columns]
+    missing_cols = [c for c in export_cols if c not in df.columns]
+    if missing_cols:
+        logger.info("Export: skipping missing columns: %s", missing_cols)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df[existing].to_csv(out_path, index=False)
+    logger.info("Saved analysis-ready CSV to: %s", out_path)
+
+    return out_path
+
+
+def main() -> None:
+    """
+    Smoke test / end-to-end export:
+    python -m model_pipeline.training.s06_topic_allocation
+    """
+    import logging
+
+    from model_pipeline.training.s01_data_loader import load_articles
+    from model_pipeline.training.s02_cleaning import run_cleaning
+    from model_pipeline.training.s03_spacy_processing import run_spacy_processing
+    from model_pipeline.training.s04_vectorisation import run_vectorisation
+    from model_pipeline.training.s05_nmf_training import run_nmf_training
+
+    logging.basicConfig(level=logging.INFO)
+
+    # 1) Load + preprocess
+    df = load_articles("full_retro")
+    df = run_cleaning(df)
+    df = run_spacy_processing(df)
+
+    # 2) Vectorise (fit vectorizer on this corpus)
+    vec_out = run_vectorisation(df)
+
+    # 3) Train final NMF (final notebook settings)
+    nmf_out = run_nmf_training(vec_out.X)
+
+    # 4) Allocate topics + export
+    df_alloc = run_topic_allocation(
+        df,
+        nmf_model=nmf_out.nmf_model,
+        vectorizer=vec_out.vectorizer,
+    )
+
+    out_csv = Path("data/full_retro/retro_topics_analysis_ready.csv")
+    export_analysis_ready_csv(df_alloc, out_csv)
+
+    print("\n✅ Wrote:", out_csv)
+    print("Rows:", len(df_alloc))
+    print("Example topic cols:", [TOPIC_NAMES[i] for i in range(5)], "...")
+
+
+if __name__ == "__main__":
+    main()
